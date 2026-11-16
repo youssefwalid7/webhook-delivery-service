@@ -8,6 +8,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  worker:
+    build: .
+    command: ["node", "src/worker.js"]
+    environment:
+      DATABASE_URL: postgres://webhooks:webhooks@db:5432/webhooks
+    depends_on:
+      db:
+        condition: service_healthy
   db:
     image: postgres:16-alpine
     environment:
