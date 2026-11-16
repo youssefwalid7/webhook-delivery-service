@@ -51,6 +51,7 @@ async function send(job) {
   try {
     const response = await fetch(job.url, {
       method: 'POST',
+      redirect: 'manual',
       headers: {
         'Content-Type': 'application/json',
         'Webhook-Timestamp': timestamp,
