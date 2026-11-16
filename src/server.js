@@ -34,14 +34,9 @@ function validEventType(type) {
 }
 
 function parseEndpointUrl(value) {
-  if (typeof value !== 'string') return null;
-
   try {
     const url = new URL(value);
-    if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
-      return null;
-    }
-    return url.href;
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
   } catch {
     return null;
   }
@@ -55,7 +50,7 @@ app.post('/endpoints', async (req, res) => {
   const endpointUrl = parseEndpointUrl(url);
   if (!endpointUrl || !Array.isArray(eventTypes) ||
       eventTypes.length === 0 || !eventTypes.every(validEventType)) {
-    return res.status(400).json({ error: 'An HTTPS URL and nonempty eventTypes list are required' });
+    return res.status(400).json({ error: 'A valid URL and nonempty eventTypes list are required' });
   }
 
   const endpointId = randomUUID();
