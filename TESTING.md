@@ -19,6 +19,8 @@ Speed numbers come from this laptop, not a real server.
 | 8 | Signature | ✅ Real body matches; a changed body or wrong key does not |
 | 9 | Worker crashes while sending | ✅ The job came back 30 s later with the same ID |
 | 10 | Sending speed, 1 worker vs 3 | ⚠️ About 2,400 per second; more workers didn't help, Postgres is the limit |
+| 11 | Batching: 50 jobs per query | ✅ 2.5 times faster (about 6,100 per second) with much less database work |
+| 12 | Test 6 again, with batching | ⚠️ Same final result, but a saved status can lag up to 5 s behind |
 
 ---
 
@@ -202,6 +204,52 @@ What `/flaky` received:
 
 **What it means:** about 2,400 deliveries per second. Three workers were barely faster. Postgres got busier while each worker got less busy, so the workers were waiting for the database. Postgres is the shared limit: every delivery is 2 writes, one to take the job and one to save the result. The first fix to try is taking many jobs per query instead of one.
 
+## 11. Batching: 50 jobs per query
+
+Commit `ae307b3` · 2026-11-16
+
+**Change:** each worker loop now takes up to `BATCH_SIZE` jobs in one query, sends them all at the same time, and saves all the results in one query. Before, every delivery needed 2 queries. With a batch of 50, it needs 2 queries per 50 deliveries.
+
+**Steps:** stop the worker and queue 50,000 deliveries to a fast endpoint directly with SQL. Start the worker and time until nothing is pending. Empty the tables between runs. A batch size of 1 is the old behavior.
+
+| Batch size | Workers | 50,000 sent in | Per second | Postgres CPU | Worker CPU |
+|---|---|---|---|---|---|
+| 1 (old way) | 1 | 20.4 s | 2,455 | 275% | 115% |
+| 10 | 1 | 8.7 s | 5,727 | 115% | 150% |
+| **50** | 1 | 8.2 s | **6,097** | **52%** | 160% |
+| 100 | 1 | 8.7 s | 5,747 | 48% | 162% |
+| 50 | 3 | 6.4 s | 7,763 | 119% | 141% + 149% + 151% |
+
+All 50,000 were delivered in every run, with 0 worker errors. CPU is one sample taken 2 s into each run, so treat it as a rough guide.
+
+**What it means:**
+- **2.5 times faster with 1 worker**, while Postgres used about 13 times less CPU per delivery (275% for 2,455 per second vs 52% for 6,097 per second). Fewer trips to the database means fewer saves waiting on the disk.
+- **The limit moved from Postgres to the worker.** The worker's CPU went up and Postgres had room to spare. That's why 3 workers now help (7,763 per second), unlike in test 10.
+- **Above about 50 there's no gain:** 100 was no faster than 50. We keep `BATCH_SIZE = 50`.
+- At 3 workers the laptop itself is busy (about 6 of its 10 cores), so higher numbers need a real server to measure.
+
+## 12. Test 6 again, with batching
+
+Commit `ae307b3` · 2026-11-16
+
+**Steps:** same as test 6: one event to `/ok`, `/fail`, `/slow`, `/flaky` and an offline endpoint.
+
+| Check | Result |
+|---|---|
+| Final states after 41 s | Same as test 6: `/ok` and `/flaky` delivered; `/fail`, `/slow` and offline `dead` ✅ |
+| When `/ok` received the webhook | 0.3 s after publishing ✅ |
+| What the database said about `/ok` 2 s after publishing | Still `pending` ⚠️ |
+
+**What it means:** `/ok` was in the same batch as `/slow`. The batch is saved only when its slowest job finishes (up to 5 s). The customer got the webhook on time, but **our saved status lagged behind.**
+
+### The downsides of batching for database writes
+
+1. **Saved status lags.** A result is written only when the whole batch is done, so one slow endpoint delays the saved status of the other 49 by up to 5 s.
+2. **More duplicates after a crash.** If the worker dies during those 5 s, all 50 jobs come back after 30 s. That includes jobs that were already delivered, so they are sent again.
+3. **One problem hits 50 jobs.** A crash or a failed save affects the whole batch, and every job in it has used up one attempt.
+4. **Row writes don't shrink.** Each delivery is still 1 insert and 2 updates. Postgres writes a new copy of a row on every update, and autovacuum cleans up the old copies later. Batching cuts **trips and commits**, not the amount of row writing.
+5. **The 30 s hide must cover the whole batch.** This is fine because the batch is sent in parallel (5 s at most). Sent one by one (50 × 5 s), the hide would run out and jobs would be sent twice.
+
 ---
 
 ## Still to test
@@ -210,7 +258,8 @@ What `/flaky` received:
 - [x] A failing endpoint is retried, then moved to `dead` (the DLQ) (test 6)
 - [x] A slow or offline endpoint does not hold up healthy ones (test 6)
 - [x] A worker that crashes mid-send: the job comes back after 30 s (test 9)
-- [ ] The real test receiver checks signatures and skips duplicate IDs
+- [x] Taking 50 jobs per query instead of 1: does it beat 2,400 per second? (test 11: yes, about 6,100)
+- [ ] The committed test receiver and a demo script (assignment item 4)
 - [ ] A crash during the **last** attempt ends as `dead` ("worker stopped during the last attempt")
-- [ ] Taking 50 jobs per query instead of 1: does it beat 2,400 per second?
+- [ ] Many slow endpoints at once (for example 10% of deliveries): how much does the speed drop?
 - [ ] Is the publish limit (about 2,500 per second) Node or Postgres? Run 2 API copies and compare
