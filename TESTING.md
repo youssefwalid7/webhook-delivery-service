@@ -14,6 +14,11 @@ Speed numbers come from this laptop, not a real server.
 | 3 | Which URLs we accept | ✅ http and https accepted, junk rejected |
 | 4 | Burst of 10,000 events | ✅ About 2,500 events per second, 0 failures |
 | 5 | One event with 50,000 subscribers | ⚠️ Works, but takes 1.5 s per event |
+| 6 | Worker: one event, five kinds of endpoint | ✅ Healthy endpoint done at once; broken ones retried, then `dead` |
+| 7 | Retries keep the same ID | ✅ Same ID 3 times, waits of 1 s then 2 s |
+| 8 | Signature | ✅ Real body matches; a changed body or wrong key does not |
+| 9 | Worker crashes while sending | ✅ The job came back 30 s later with the same ID |
+| 10 | Sending speed, 1 worker vs 3 | ⚠️ About 2,400 per second; more workers didn't help, Postgres is the limit |
 
 ---
 
@@ -101,10 +106,111 @@ Commit `dcc91ba` · 2026-11-16
 
 ---
 
+## Worker tests (6–10)
+
+Commit `4b3dd69` · 2026-11-16
+
+**Setup for all worker tests:** a temporary test server (not committed) with these paths:
+
+| Path | Behaves like |
+|---|---|
+| `/ok` | A healthy endpoint: answers 200 |
+| `/fail` | A broken endpoint: answers 500 |
+| `/slow` | A slow endpoint: answers after 10 s, longer than our 5 s limit |
+| `/flaky` | Fails twice for each delivery ID, then answers 200 |
+| `http://sink:4999/down` | Offline: nothing is listening on that port |
+
+Retry waits are 1, 2, 4 and 8 s, so 5 attempts in total. The real test receiver replaces this server in the next step.
+
+## 6. Worker: one event, five kinds of endpoint
+
+**Goal:** each delivery is handled on its own, so a broken endpoint does not hold up a healthy one.
+
+**Steps:** subscribe all five to `message.received` and publish one event.
+
+**2 seconds after publishing:**
+
+| Endpoint | state | attempts | last_error |
+|---|---|---|---|
+| `/ok` | delivered | 1 | |
+| `/flaky` | pending | 2 | HTTP 503 |
+| `/fail` | pending | 2 | HTTP 500 |
+| `/slow` | pending | 1 | (still waiting for an answer) |
+| down | pending | 2 | ECONNREFUSED |
+
+**41 seconds after publishing, everything finished:**
+
+| Endpoint | state | attempts | last_error |
+|---|---|---|---|
+| `/ok` | delivered | 1 | |
+| `/flaky` | delivered | 3 | |
+| `/fail` | dead | 5 | HTTP 500 |
+| `/slow` | dead | 5 | timeout |
+| down | dead | 5 | ECONNREFUSED |
+
+**What it means:** `/ok` was delivered at once while the others were still failing. Each to-do row is separate, so a broken endpoint only delays its own rows. Endpoints that never work end up `dead` (our DLQ), and the reason is saved.
+
+## 7. Retries keep the same ID
+
+What `/flaky` received:
+
+| Time | Delivery ID | Answer |
+|---|---|---|
+| 16:09:31 | `92e998dc-…` | 503 |
+| 16:09:32 (1 s later) | `92e998dc-…` | 503 |
+| 16:09:34 (2 s later) | `92e998dc-…` | 200 |
+
+**What it means:** the ID stays the same on every retry, so a receiver can use it to skip duplicates. The waits follow `RETRY_DELAYS`.
+
+## 8. Signature
+
+**Steps:** take the request `/ok` received and compute the signature again with the endpoint's secret key.
+
+| Check | Expected | Result |
+|---|---|---|
+| Real body and the right secret | Match | ✅ Match |
+| Body changed (`hello` → `HACKED`) | No match | ✅ No match |
+| Wrong secret | No match | ✅ No match |
+
+## 9. Worker crashes while sending
+
+**Steps:** subscribe `/slow` to a new event type and publish. Kill the worker 1 s later, while it waits for the answer. Start it again.
+
+| Check | Expected | Result |
+|---|---|---|
+| Row right after the kill | `pending`, 1 attempt, hidden for about 30 s | ✅ `pending`, 1 attempt, hidden 29 s |
+| Job comes back | After 30 s, with the same ID | ✅ Sent at 16:10:43 and again at 16:11:13, same ID |
+
+**What it means:** no recovery code is needed. The 30 s hide (the visibility timeout) brings the job back by itself. The first send may already have reached the endpoint, so the endpoint can get the same delivery twice. This is at-least-once delivery.
+
+## 10. Sending speed, 1 worker vs 3
+
+**Steps:** stop the worker, queue deliveries to `/ok`, start 1 or 3 workers, and time until nothing is pending. Times include about 1 s to start the containers.
+
+| Deliveries | 1 worker | 3 workers |
+|---|---|---|
+| 5,000 | 3.6 s | 3.5 s |
+| 20,000 | 8.4 s | 7.6 s |
+
+**CPU while sending 20,000** (100% = one CPU core):
+
+| Container | 1 worker | 3 workers |
+|---|---|---|
+| Postgres | 276% | 373% |
+| Worker(s) | 120% | 87% + 76% + 78% |
+| Test server | 31% | 38% |
+
+**What it means:** about 2,400 deliveries per second. Three workers were barely faster. Postgres got busier while each worker got less busy, so the workers were waiting for the database. Postgres is the shared limit: every delivery is 2 writes, one to take the job and one to save the result. The first fix to try is taking many jobs per query instead of one.
+
+---
+
 ## Still to test
 
-- [ ] The worker sends a signed webhook and the row becomes `delivered`
-- [ ] A failing endpoint is retried, then moved to `dead` (the DLQ)
-- [ ] A slow or offline endpoint does not hold up healthy ones
-- [ ] A worker that crashes mid-send: the job comes back after 30 s
-- [ ] Is the 2,500 per second limit Node or Postgres? Run 2 API copies and compare
+- [x] The worker sends a signed webhook and the row becomes `delivered` (tests 6 and 8)
+- [x] A failing endpoint is retried, then moved to `dead` (the DLQ) (test 6)
+- [x] A slow or offline endpoint does not hold up healthy ones (test 6)
+- [x] A worker that crashes mid-send: the job comes back after 30 s (test 9)
+- [ ] The real test receiver checks signatures and skips duplicate IDs
+- [ ] A crash during the **last** attempt ends as `dead` ("worker stopped during the last attempt")
+- [ ] Taking 50 jobs per query instead of 1: does it beat 2,400 per second?
+- [ ] Is the publish limit (about 2,500 per second) Node or Postgres? Run 2 API copies and compare
