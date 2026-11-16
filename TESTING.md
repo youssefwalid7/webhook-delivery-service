@@ -285,6 +285,13 @@ docker compose run --rm demo
 - [x] A worker that crashes mid-send: the job comes back after 30 s (test 9)
 - [x] Taking 50 jobs per query instead of 1: does it beat 2,400 per second? (test 11: yes, about 6,100)
 - [x] The committed test receiver and a demo script (test 13)
-- [ ] A crash during the **last** attempt ends as `dead` ("worker stopped during the last attempt")
-- [ ] Many slow endpoints at once (for example 10% of deliveries): how much does the speed drop?
+- [x] Recovery from an expired final claim is covered by the submission review below.
+- [ ] Measure sustained throughput with a representative mix of fast and slow receivers.
 - [ ] Is the publish limit (about 2,500 per second) Node or Postgres? Run 2 API copies and compare
+
+## 14. Submission review
+
+- **Demo after the redirect fix.** All 11 checks passed.
+- **Redirect regression.** Registered one endpoint that returned 302 to a second route on a temporary receiver. It received five POST attempts with signature headers. The destination received zero requests. The delivery ended `dead` with `HTTP 302`.
+- **Expired final claim.** Seeded a due pending row with five claims already counted. The worker marked it `dead` with “worker stopped during the last attempt,” without a sixth HTTP request. The recovery claim incremented the stored counter to six.
+- **Slow endpoint saturation.** Queued 500 deliveries to one receiver that waited ten seconds before responding. Once all 500 slots had active requests, published one delivery to a healthy endpoint. The healthy receiver got it after 4.7 seconds in this run.

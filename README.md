@@ -2,7 +2,7 @@
 
 Customers register an endpoint (a URL plus the event types they want). The platform publishes events, and the service delivers each event to every subscribed endpoint. Each request is signed, with retries and a dead-letter state. It's built with Node, Express and Postgres, and a Postgres table is the queue.
 
-- **[DESIGN.md](DESIGN.md)**: the design doc, covering guarantees, failure behavior, scale, and what I chose not to do.
+- **Design** — [Two-page PDF](DESIGN.pdf) · [Markdown](DESIGN.md)
 - **[TESTING.md](TESTING.md)**: every test I ran, with measured results.
 
 ## Run it
@@ -56,9 +56,9 @@ Each delivery is a `POST` with the JSON body `{ id, type, createdAt, data }` and
 - `Webhook-Timestamp`: Unix seconds.
 - `Webhook-Signature`: hex HMAC-SHA256 of `timestamp + "." + raw body`, computed with the endpoint's secret.
 
-To verify one, compute the signature yourself and compare in constant time, then reject timestamps older than 5 minutes. [`verify()` in src/signature.js](src/signature.js) does exactly this.
+To verify one, compute the signature yourself and compare in constant time. Accept timestamps within 5 minutes of your clock. [`verify()` in src/signature.js](src/signature.js) does exactly this.
 
-Answer with a 2xx within 5 s. Anything else is retried. The same `id` can arrive more than once, so skip IDs you have already processed.
+Answer with a 2xx within 5 s after durably accepting the work. Redirects and other failures use the retry budget. The same `id` can arrive more than once, so deduplicate by delivery ID.
 
 ## Files
 
@@ -71,4 +71,4 @@ Answer with a 2xx within 5 s. Anything else is retried. The same `id` can arrive
 | `src/receiver.js` | Test receiver: `/ok`, `/fail`, `/slow`, `/flaky` |
 | `scripts/demo.js` | The demo and its checks |
 
-Worker settings (batch size, timeout, retry waits) are constants at the top of `src/worker.js`. The retry waits are short (1, 2, 4, 8 s) so the demo finishes quickly. DESIGN.md gives the production values.
+Worker settings (batch size, timeout, retry waits) are constants at the top of `src/worker.js`. The retry waits are short (1, 2, 4, 8 s) so the demo finishes quickly. The design describes the proposed production retry window.
