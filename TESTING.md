@@ -21,6 +21,7 @@ Speed numbers come from this laptop, not a real server.
 | 10 | Sending speed, 1 worker vs 3 | ⚠️ About 2,400 per second; more workers didn't help, Postgres is the limit |
 | 11 | Batching: 50 jobs per query | ✅ 2.5 times faster (about 6,100 per second) with much less database work |
 | 12 | Test 6 again, with batching | ⚠️ Same final result, but a saved status can lag up to 5 s behind |
+| 13 | Demo script, fresh start | ✅ 11 of 11 checks passed, 3 runs in a row, in about 43 s each |
 
 ---
 
@@ -250,6 +251,30 @@ Commit `ae307b3` · 2026-11-16
 4. **Row writes don't shrink.** Each delivery is still 1 insert and 2 updates. Postgres writes a new copy of a row on every update, and autovacuum cleans up the old copies later. Batching cuts **trips and commits**, not the amount of row writing.
 5. **The 30 s hide must cover the whole batch.** This is fine because the batch is sent in parallel (5 s at most). Sent one by one (50 × 5 s), the hide would run out and jobs would be sent twice.
 
+## 13. Demo script, fresh start
+
+2026-11-16
+
+**Goal:** prove that someone cloning the repo can see everything work with two commands. This replaces the temporary test server with the committed receiver (`src/receiver.js`).
+
+**Steps:** start from nothing, with no containers and no volume:
+
+```sh
+docker compose up --build
+docker compose run --rm demo
+```
+
+**Result:** 11 of 11 checks passed and the script exited with 0. It ran 3 times in a row, about 43 s each, and each run uses its own event type so runs don't mix. There were 0 errors in the API, worker and receiver logs.
+
+| Check | Result |
+|---|---|
+| `ok` had its webhook after 2 s, while `fail`, `slow` and `down` were still being retried | ✅ |
+| `ok` delivered on the first try | ✅ |
+| `flaky` delivered on try 3, with the same `id` every time | ✅ |
+| `fail` / `slow` / `down` ended `dead` after 5 tries (`HTTP 500` / `timeout` / `ECONNREFUSED`) | ✅ |
+| All 14 webhooks the receiver got have a valid signature | ✅ |
+| Changed body, wrong secret, or a correctly signed 10-minute-old webhook: all rejected | ✅ |
+
 ---
 
 ## Still to test
@@ -259,7 +284,7 @@ Commit `ae307b3` · 2026-11-16
 - [x] A slow or offline endpoint does not hold up healthy ones (test 6)
 - [x] A worker that crashes mid-send: the job comes back after 30 s (test 9)
 - [x] Taking 50 jobs per query instead of 1: does it beat 2,400 per second? (test 11: yes, about 6,100)
-- [ ] The committed test receiver and a demo script (assignment item 4)
+- [x] The committed test receiver and a demo script (test 13)
 - [ ] A crash during the **last** attempt ends as `dead` ("worker stopped during the last attempt")
 - [ ] Many slow endpoints at once (for example 10% of deliveries): how much does the speed drop?
 - [ ] Is the publish limit (about 2,500 per second) Node or Postgres? Run 2 API copies and compare
