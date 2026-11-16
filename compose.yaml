@@ -16,6 +16,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  receiver:
+    build: .
+    command: ["node", "src/receiver.js"]
+  demo:
+    build: .
+    command: ["node", "scripts/demo.js"]
+    profiles: ["demo"] # not started by "docker compose up"; run with "docker compose run --rm demo"
+    environment:
+      DATABASE_URL: postgres://webhooks:webhooks@db:5432/webhooks
+    depends_on: [api, worker, receiver]
   db:
     image: postgres:16-alpine
     environment:
